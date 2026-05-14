@@ -6,522 +6,201 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: نصب Flutter
+      - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
 
-      - name: ایجاد ساختار پروژه
+      - name: Create Flutter project in subfolder
         run: |
-          flutter create --platforms android --project-name apocalypse_net .
-          rm -f lib/main.dart
+          set -e
+          # create project in a subfolder to avoid overwriting repo root
+          flutter create --platforms android --project-name apocalypse_net apocalypse_net
 
-      - name: نوشتن تمام فایل‌های Dart و تنظیمات
+      - name: Ensure Android licenses accepted
         run: |
-          # ----- pubspec.yaml -----
-          cat > pubspec.yaml << 'EOF'
-          name: apocalypse_net
-          description: "اینترنت آخرالزمان"
-          publish_to: 'none'
-          version: 1.0.0+1
+          set -e
+          # accept android licenses (may prompt - piping yes handles it)
+          yes | flutter doctor --android-licenses || true
+          flutter doctor -v
 
-          environment:
-            sdk: '>=3.2.0 <4.0.0'
+      - name: Write minimal app files
+        run: |
+          set -e
+          # Overwrite pubspec.yaml inside the generated project with required deps
+          cat > apocalypse_net/pubspec.yaml << 'EOF'
+name: apocalypse_net
+description: "اینترنت آخرالزمان"
+publish_to: 'none'
+version: 1.0.0+1
 
-          dependencies:
-            flutter:
-              sdk: flutter
-            google_fonts: ^6.1.0
-            animated_text_kit: ^4.2.2
+environment:
+  sdk: '>=3.2.0 <4.0.0'
 
-          dev_dependencies:
-            flutter_test:
-              sdk: flutter
+dependencies:
+  flutter:
+    sdk: flutter
+  google_fonts: ^6.1.0
+  animated_text_kit: ^4.2.2
 
-          flutter:
-            uses-material-design: true
-          EOF
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
 
-          # ----- lib/theme.dart -----
-          mkdir -p lib
-          cat > lib/theme.dart << 'DARTEOF'
-          import 'package:flutter/material.dart';
-          import 'package:google_fonts/google_fonts.dart';
+flutter:
+  uses-material-design: true
+EOF
 
-          class ApocalypseTheme {
-            static const Color background = Color(0xFF0A0E14);
-            static const Color neonGreen = Color(0xFF39FF14);
-            static const Color neonBlue = Color(0xFF00F0FF);
-            static const Color neonPurple = Color(0xFFBF5AF2);
-            static const Color darkSurface = Color(0xFF1A1E24);
-            static const Color textPrimary = Color(0xFFE0E0E0);
-            static const Color textSecondary = Color(0xFF9E9E9E);
+          mkdir -p apocalypse_net/lib/mesh apocalypse_net/lib/widgets apocalypse_net/lib/screens
 
-            static ThemeData get darkTheme => ThemeData(
-                  brightness: Brightness.dark,
-                  scaffoldBackgroundColor: background,
-                  primaryColor: neonGreen,
-                  appBarTheme: AppBarTheme(
-                    backgroundColor: darkSurface,
-                    titleTextStyle: GoogleFonts.orbitron(
-                      fontSize: 20, fontWeight: FontWeight.bold, color: neonGreen),
-                    iconTheme: const IconThemeData(color: neonGreen),
-                  ),
-                  textTheme: TextTheme(
-                    bodyLarge: GoogleFonts.robotoMono(color: textPrimary),
-                    bodyMedium: GoogleFonts.robotoMono(color: textSecondary),
-                  ),
-                  elevatedButtonTheme: ElevatedButtonThemeData(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: neonGreen,
-                      foregroundColor: background,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    ),
-                  ),
-                );
+          # theme.dart
+          cat > apocalypse_net/lib/theme.dart << 'DART'
+import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
+
+class ApocalypseTheme {
+  static const Color background = Color(0xFF0A0E14);
+  static const Color neonGreen = Color(0xFF39FF14);
+  static const Color neonBlue = Color(0xFF00F0FF);
+  static const Color darkSurface = Color(0xFF1A1E24);
+  static const Color textPrimary = Color(0xFFE0E0E0);
+  static const Color textSecondary = Color(0xFF9E9E9E);
+
+  static ThemeData get darkTheme => ThemeData(
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: background,
+        primaryColor: neonGreen,
+        appBarTheme: AppBarTheme(
+          backgroundColor: darkSurface,
+          titleTextStyle: GoogleFonts.orbitron(
+              fontSize: 20, fontWeight: FontWeight.bold, color: neonGreen),
+          iconTheme: const IconThemeData(color: neonGreen),
+        ),
+        textTheme: TextTheme(
+          bodyLarge: GoogleFonts.robotoMono(color: textPrimary),
+          bodyMedium: GoogleFonts.robotoMono(color: textSecondary),
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: neonGreen,
+            foregroundColor: background,
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        ),
+      );
+}
+DART
+
+          # mesh_manager.dart (safe on CI)
+          cat > apocalypse_net/lib/mesh/mesh_manager.dart << 'DART'
+import 'dart:async';
+import 'package:flutter/services.dart';
+
+class MeshManager {
+  final List<Map<String, dynamic>> peers = [];
+  final List<String> messages = [];
+  void Function()? onPeersChanged;
+  void Function()? onMessageReceived;
+
+  static const EventChannel _peerChannel = EventChannel('apocalypse_net/peers');
+
+  Future<void> init() async {
+    try {
+      _peerChannel.receiveBroadcastStream().listen((data) {
+        if (data is List) {
+          peers.clear();
+          for (var p in data) {
+            peers.add(Map<String, dynamic>.from(p));
           }
-          DARTEOF
+          onPeersChanged?.call();
+        }
+      });
+    } catch (_) {
+      // Platform channel not implemented on CI/emulator — ignore
+    }
+  }
 
-          # ----- lib/mesh/mesh_manager.dart -----
-          mkdir -p lib/mesh
-          cat > lib/mesh/mesh_manager.dart << 'DARTEOF'
-          import 'dart:async';
-          import 'package:flutter/services.dart';
+  Future<void> sendText(String text) async {
+    messages.add('من: $text');
+    onMessageReceived?.call();
+  }
 
-          class MeshManager {
-            final List<Map<String, dynamic>> peers = [];
-            final List<String> messages = [];
-            Function? onPeersChanged;
-            Function? onMessageReceived;
+  void dispose() {}
+}
+DART
 
-            static const EventChannel _peerChannel = EventChannel('apocalypse_net/peers');
+          # minimal main.dart (uses theme + simple home)
+          cat > apocalypse_net/lib/main.dart << 'DART'
+import 'package:flutter/material.dart';
+import 'package:apocalypse_net/theme.dart';
+import 'package:apocalypse_net/mesh/mesh_manager.dart';
+import 'package:apocalypse_net/screens/home_screen.dart';
 
-            Future<void> init() async {
-              _peerChannel.receiveBroadcastStream().listen((data) {
-                if (data is List) {
-                  peers.clear();
-                  for (var p in data) {
-                    peers.add(Map<String, dynamic>.from(p));
-                  }
-                  onPeersChanged?.call();
-                }
-              });
-            }
+void main() => runApp(const ApocalypseNetApp());
 
-            Future<void> sendText(String text) async {
-              messages.add('من: $text');
-              onMessageReceived?.call();
-            }
+class ApocalypseNetApp extends StatelessWidget {
+  const ApocalypseNetApp({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'اینترنت آخرالزمان',
+      debugShowCheckedModeBanner: false,
+      theme: ApocalypseTheme.darkTheme,
+      home: const SplashInit(),
+    );
+  }
+}
 
-            void dispose() {}
-          }
-          DARTEOF
+class SplashInit extends StatefulWidget {
+  const SplashInit({super.key});
+  @override
+  State<SplashInit> createState() => _SplashInitState();
+}
 
-          # ----- lib/widgets/radar_painter.dart -----
-          mkdir -p lib/widgets
-          cat > lib/widgets/radar_painter.dart << 'DARTEOF'
-          import 'dart:math';
-          import 'package:flutter/material.dart';
-          import 'package:apocalypse_net/theme.dart';
+class _SplashInitState extends State<SplashInit> {
+  final MeshManager _meshManager = MeshManager();
+  bool _initialized = false;
 
-          class RadarPainter extends CustomPainter {
-            final List<Offset> nodePositions;
-            final double animationValue;
+  @override
+  void initState() {
+    super.initState();
+    _initMesh();
+  }
 
-            RadarPainter({required this.nodePositions, required this.animationValue});
+  Future<void> _initMesh() async {
+    await _meshManager.init();
+    setState(() => _initialized = true);
+  }
 
-            @override
-            void paint(Canvas canvas, Size size) {
-              final center = Offset(size.width / 2, size.height / 2);
-              final radius = min(size.width, size.height) / 2 - 10;
+  @override
+  Widget build(BuildContext context) {
+    if (!_initialized) {
+      return const Scaffold(
+          body: Center(
+              child:
+                  CircularProgressIndicator(color: ApocalypseTheme.neonGreen)));
+    }
+    return HomeScreen(meshManager: _meshManager);
+  }
+}
+DART
 
-              for (int i = 1; i <= 4; i++) {
-                final paint = Paint()
-                  ..color = ApocalypseTheme.neonGreen.withOpacity(0.1 * i)
-                  ..style = PaintingStyle.stroke
-                  ..strokeWidth = 1.5;
-                canvas.drawCircle(center, radius * i / 4, paint);
-              }
-
-              final scanPaint = Paint()
-                ..shader = SweepGradient(
-                  colors: [
-                    ApocalypseTheme.neonGreen.withOpacity(0),
-                    ApocalypseTheme.neonGreen.withOpacity(0.8),
-                    ApocalypseTheme.neonGreen.withOpacity(0),
-                  ],
-                  stops: const [0.0, 0.3, 1.0],
-                ).createShader(Rect.fromCircle(center: center, radius: radius))
-                ..style = PaintingStyle.fill;
-              canvas.save();
-              canvas.rotate(animationValue * 2 * pi);
-              canvas.drawArc(
-                Rect.fromCircle(center: center, radius: radius),
-                -pi / 4, pi / 2, true, scanPaint);
-              canvas.restore();
-
-              for (final pos in nodePositions) {
-                final nodeOffset = Offset(
-                  center.dx + pos.dx * radius - radius / 2,
-                  center.dy + pos.dy * radius - radius / 2,
-                );
-                final glowPaint = Paint()
-                  ..color = ApocalypseTheme.neonBlue.withOpacity(0.4)
-                  ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8);
-                canvas.drawCircle(nodeOffset, 8, glowPaint);
-                final nodePaint = Paint()..color = ApocalypseTheme.neonBlue;
-                canvas.drawCircle(nodeOffset, 5, nodePaint);
-                final textPainter = TextPainter(
-                  text: TextSpan(text: 'Node', style: TextStyle(color: ApocalypseTheme.neonBlue, fontSize: 8)),
-                  textDirection: TextDirection.ltr,
-                )..layout();
-                textPainter.paint(canvas, Offset(nodeOffset.dx - 10, nodeOffset.dy - 15));
-              }
-
-              canvas.drawCircle(center, 10, Paint()..color = ApocalypseTheme.neonGreen);
-            }
-
-            @override
-            bool shouldRepaint(covariant RadarPainter oldDelegate) => true;
-          }
-          DARTEOF
-
-          # ----- lib/screens/home_screen.dart -----
-          mkdir -p lib/screens
-          cat > lib/screens/home_screen.dart << 'DARTEOF'
-          import 'dart:math';
-          import 'package:flutter/material.dart';
-          import 'package:apocalypse_net/mesh/mesh_manager.dart';
-          import 'package:apocalypse_net/widgets/radar_painter.dart';
-          import 'package:apocalypse_net/theme.dart';
-          import 'package:apocalypse_net/screens/chat_screen.dart';
-
-          class HomeScreen extends StatefulWidget {
-            final MeshManager meshManager;
-            const HomeScreen({super.key, required this.meshManager});
-
-            @override
-            State<HomeScreen> createState() => _HomeScreenState();
-          }
-
-          class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
-            late AnimationController _radarAnim;
-            final Random _random = Random();
-
-            @override
-            void initState() {
-              super.initState();
-              _radarAnim = AnimationController(vsync: this, duration: const Duration(seconds: 3))..repeat();
-              widget.meshManager.onPeersChanged = () => setState(() {});
-            }
-
-            @override
-            void dispose() {
-              _radarAnim.dispose();
-              super.dispose();
-            }
-
-            List<Offset> get _simulatedPositions {
-              return List.generate(
-                widget.meshManager.peers.length,
-                (i) => Offset(_random.nextDouble() * 2 - 1, _random.nextDouble() * 2 - 1),
-              );
-            }
-
-            @override
-            Widget build(BuildContext context) {
-              return Scaffold(
-                appBar: AppBar(
-                  title: const Text('آخرالزمان'),
-                  actions: [
-                    IconButton(
-                      icon: const Icon(Icons.chat_bubble),
-                      onPressed: () {
-                        Navigator.push(context, MaterialPageRoute(builder: (_) => ChatScreen(meshManager: widget.meshManager)));
-                      },
-                    ),
-                  ],
-                ),
-                body: Column(
-                  children: [
-                    Expanded(
-                      flex: 2,
-                      child: AnimatedBuilder(
-                        animation: _radarAnim,
-                        builder: (_, __) => CustomPaint(
-                          size: Size.infinite,
-                          painter: RadarPainter(
-                            nodePositions: _simulatedPositions,
-                            animationValue: _radarAnim.value,
-                          ),
-                        ),
-                      ),
-                    ),
-                    Expanded(
-                      flex: 1,
-                      child: Container(
-                        color: ApocalypseTheme.darkSurface,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Padding(
-                              padding: const EdgeInsets.all(8.0),
-                              child: Text('گره‌های فعال: ${widget.meshManager.peers.length}',
-                                  style: const TextStyle(color: ApocalypseTheme.neonGreen, fontWeight: FontWeight.bold)),
-                            ),
-                            Expanded(
-                              child: ListView.builder(
-                                itemCount: widget.meshManager.peers.length,
-                                itemBuilder: (ctx, i) {
-                                  final node = widget.meshManager.peers[i];
-                                  return ListTile(
-                                    leading: Icon(Icons.phone_android, color: ApocalypseTheme.neonGreen),
-                                    title: Text(node['name'] ?? 'Unknown', style: TextStyle(color: ApocalypseTheme.textPrimary)),
-                                    subtitle: Text('سیگنال: ${_random.nextInt(80) + 20}%', style: TextStyle(color: ApocalypseTheme.textSecondary)),
-                                    trailing: Icon(Icons.wifi_tethering, color: ApocalypseTheme.neonBlue),
-                                  );
-                                },
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }
-          }
-          DARTEOF
-
-          # ----- lib/screens/chat_screen.dart -----
-          cat > lib/screens/chat_screen.dart << 'DARTEOF'
-          import 'package:flutter/material.dart';
-          import 'package:apocalypse_net/mesh/mesh_manager.dart';
-          import 'package:apocalypse_net/theme.dart';
-
-          class ChatScreen extends StatefulWidget {
-            final MeshManager meshManager;
-            const ChatScreen({super.key, required this.meshManager});
-
-            @override
-            State<ChatScreen> createState() => _ChatScreenState();
-          }
-
-          class _ChatScreenState extends State<ChatScreen> {
-            final TextEditingController _controller = TextEditingController();
-
-            @override
-            void initState() {
-              super.initState();
-              widget.meshManager.onMessageReceived = () => setState(() {});
-            }
-
-            void _send() {
-              if (_controller.text.isNotEmpty) {
-                widget.meshManager.sendText(_controller.text);
-                _controller.clear();
-                setState(() {});
-              }
-            }
-
-            @override
-            Widget build(BuildContext context) {
-              return Scaffold(
-                appBar: AppBar(title: const Text('کانال مشترک')),
-                body: Column(
-                  children: [
-                    Expanded(
-                      child: ListView.builder(
-                        itemCount: widget.meshManager.messages.length,
-                        itemBuilder: (ctx, i) {
-                          final msg = widget.meshManager.messages[i];
-                          final isMine = msg.startsWith('من:');
-                          return Align(
-                            alignment: isMine ? Alignment.centerRight : Alignment.centerLeft,
-                            child: Container(
-                              margin: const EdgeInsets.all(4),
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                              decoration: BoxDecoration(
-                                color: isMine ? ApocalypseTheme.neonGreen.withOpacity(0.2) : ApocalypseTheme.neonBlue.withOpacity(0.2),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Text(msg, style: TextStyle(color: isMine ? ApocalypseTheme.neonGreen : ApocalypseTheme.neonBlue)),
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-                    SafeArea(
-                      child: Padding(
-                        padding: const EdgeInsets.all(8.0),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: TextField(
-                                controller: _controller,
-                                decoration: const InputDecoration(hintText: 'پیام...', border: OutlineInputBorder()),
-                                style: const TextStyle(color: ApocalypseTheme.textPrimary),
-                              ),
-                            ),
-                            IconButton(icon: Icon(Icons.send, color: ApocalypseTheme.neonGreen), onPressed: _send),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }
-          }
-          DARTEOF
-
-          # ----- lib/main.dart -----
-          cat > lib/main.dart << 'DARTEOF'
-          import 'package:flutter/material.dart';
-          import 'package:apocalypse_net/mesh/mesh_manager.dart';
-          import 'package:apocalypse_net/screens/home_screen.dart';
-          import 'package:apocalypse_net/theme.dart';
-
-          void main() => runApp(const ApocalypseNetApp());
-
-          class ApocalypseNetApp extends StatelessWidget {
-            const ApocalypseNetApp({super.key});
-            @override
-            Widget build(BuildContext context) {
-              return MaterialApp(
-                title: 'اینترنت آخرالزمان',
-                debugShowCheckedModeBanner: false,
-                theme: ApocalypseTheme.darkTheme,
-                home: const SplashInit(),
-              );
-            }
-          }
-
-          class SplashInit extends StatefulWidget {
-            const SplashInit({super.key});
-            @override
-            State<SplashInit> createState() => _SplashInitState();
-          }
-
-          class _SplashInitState extends State<SplashInit> {
-            final MeshManager _meshManager = MeshManager();
-            bool _initialized = false;
-
-            @override
-            void initState() {
-              super.initState();
-              _initMesh();
-            }
-
-            Future<void> _initMesh() async {
-              await _meshManager.init();
-              setState(() => _initialized = true);
-            }
-
-            @override
-            Widget build(BuildContext context) {
-              if (!_initialized) {
-                return const Scaffold(body: Center(child: CircularProgressIndicator(color: ApocalypseTheme.neonGreen)));
-              }
-              return HomeScreen(meshManager: _meshManager);
-            }
-          }
-          DARTEOF
-
-          # ----- Android Manifest (مجوزها) -----
-          cat > android/app/src/main/AndroidManifest.xml << 'XMLEOF'
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-              package="com.apocalypse.apocalypse_net">
-              <uses-permission android:name="android.permission.INTERNET"/>
-              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
-              <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
-              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
-              <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
-              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
-              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-              <uses-permission android:name="android.permission.BLUETOOTH"/>
-              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"/>
-              <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
-              <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
-              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
-              <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation"/>
-              <application
-                  android:label="اینترنت آخرالزمان"
-                  android:name="${applicationName}"
-                  android:icon="@mipmap/ic_launcher"
-                  android:usesCleartextTraffic="true">
-                  <activity
-                      android:name=".MainActivity"
-                      android:exported="true"
-                      android:launchMode="singleTop"
-                      android:theme="@style/LaunchTheme"
-                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
-                      android:hardwareAccelerated="true"
-                      android:windowSoftInputMode="adjustResize">
-                      <meta-data android:name="io.flutter.embedding.android.NormalTheme" android:resource="@style/NormalTheme"/>
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN"/>
-                          <category android:name="android.intent.category.LAUNCHER"/>
-                      </intent-filter>
-                  </activity>
-                  <meta-data android:name="flutterEmbedding" android:value="2"/>
-              </application>
-          </manifest>
-          XMLEOF
-
-          # ----- android/app/build.gradle.kts -----
-          cat > android/app/build.gradle.kts << 'GRADLEEOF'
-          plugins {
-              id("com.android.application")
-              id("org.jetbrains.kotlin.android")
-              id("dev.flutter.flutter-gradle-plugin")
-          }
-
-          android {
-              namespace = "com.apocalypse.apocalypse_net"
-              compileSdk = 34
-
-              compileOptions {
-                  sourceCompatibility = JavaVersion.VERSION_1_8
-                  targetCompatibility = JavaVersion.VERSION_1_8
-              }
-
-              kotlinOptions {
-                  jvmTarget = "1.8"
-              }
-
-              defaultConfig {
-                  applicationId = "com.apocalypse.apocalypse_net"
-                  minSdk = 21
-                  targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0"
-              }
-
-              buildTypes {
-                  release {
-                      signingConfig = signingConfigs.debug
-                  }
-              }
-          }
-
-          flutter {
-              source = "../.."
-          }
-          GRADLEEOF
-
-      - name: دریافت وابستگی‌ها
+      - name: Get dependencies
+        working-directory: apocalypse_net
         run: flutter pub get
 
-      - name: ساخت APK
+      - name: Build APK
+        working-directory: apocalypse_net
         run: flutter build apk --debug --split-per-abi
 
-      - name: آپلود APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: apocalypse-net
-          path: build/app/outputs/flutter-apk/*.apk
+          path: apocalypse_net/build/app/outputs/flutter-apk/*.apk
