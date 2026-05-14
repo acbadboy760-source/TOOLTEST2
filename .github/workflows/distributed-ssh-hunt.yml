@@ -12,9 +12,9 @@ on:
         required: false
         default: '50000'
       test_threads:
-        description: 'نخ‌های هم‌زمان تست (پیش‌فرض ۲۰۰۰)'
+        description: 'نخ‌های هم‌زمان تست (پیش‌فرض ۱۰۰۰)'
         required: false
-        default: '2000'
+        default: '1000'
       timeout:
         description: 'زمان انتظار اتصال (پیش‌فرض ۱)'
         required: true
@@ -49,7 +49,7 @@ jobs:
           except: pass
 
           SHARD_ID = int(os.environ['SHARD_ID'])
-          TEST_THREADS = int(os.environ.get('TEST_THREADS', 2000))
+          TEST_THREADS = int(os.environ.get('TEST_THREADS', 1000))
           TIMEOUT = int(os.environ.get('TIMEOUT', 1))
           SSH_PORTS = [22, 2222, 22222, 2200, 222]
           CRED_FILE = f"found_creds_shard_{SHARD_ID}.txt"
@@ -85,7 +85,7 @@ jobs:
                       return (ip, port) if result == 0 else None
                   except: return None
 
-              with concurrent.futures.ThreadPoolExecutor(max_workers=2000) as executor:
+              with concurrent.futures.ThreadPoolExecutor(max_workers=1000) as executor:
                   futures = []
                   for ip in ips:
                       for port in SSH_PORTS:
@@ -270,17 +270,12 @@ jobs:
       - name: نصب وابستگی‌ها
         run: pip3 install asyncssh uvloop aiohttp
 
-      - name: افزایش محدودیت‌های سیستم
-        run: sudo ulimit -n 65536
-
-      - name: اجرای اسکنر فوق‌سریع
+      - name: اجرای اسکنر
         env:
           SHARD_ID: ${{ matrix.shard }}
           TEST_THREADS: ${{ github.event.inputs.test_threads }}
           TIMEOUT: ${{ github.event.inputs.timeout }}
-        run: |
-          ulimit -n 65536
-          python3 scanner.py
+        run: python3 scanner.py
 
   merge:
     needs: scan_shard
